@@ -1,0 +1,13 @@
+{
+  "name": "Timebrush",
+  "description": "paintable spectral delay",
+  "author": {
+    "name": "Chaosmeister",
+    "github": "Chaosmeister"
+  },
+  "tags": [
+    "delay",
+    "spectral"
+  ],
+  "license": "CC0-1.0"
+}
