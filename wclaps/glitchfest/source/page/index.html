@@ -223,13 +223,14 @@
         const selected = selectedBlock()
         state.patterns[state.editPattern].forEach((blocks, row) => blocks.forEach(block => {
             const x = LABEL + block.start * COL, y = ROWS_Y + state.order.indexOf(row) * ROW + 1, w = block.length * COL - 1, h = ROW - 2
-            const slope = Math.min(w / 2, block.ramp / 100 * w / 2)
+            const slope = Math.min(w / 2, block.ramp / 100 * w / 2), radius = Math.min(2, w / 2, h / 2)
             context.fillStyle = blockColor(0.4 + 0.6 * block.chance / 100)
             context.beginPath()
-            context.moveTo(x, y + h)
-            context.lineTo(x + slope, y)
-            context.lineTo(x + w - slope, y)
-            context.lineTo(x + w, y + h)
+            context.moveTo(x + w / 2, y + h)
+            context.arcTo(x, y + h, x + slope, y, radius)
+            context.arcTo(x + slope, y, x + w - slope, y, radius)
+            context.arcTo(x + w - slope, y, x + w, y + h, radius)
+            context.arcTo(x + w, y + h, x, y + h, radius)
             context.closePath()
             context.fill()
             if (block === selected) {
