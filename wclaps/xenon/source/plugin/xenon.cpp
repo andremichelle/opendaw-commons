@@ -1,7 +1,8 @@
 // Xenon, a granular instrument as a WebCLAP. Grains read a mono sample, each with its own pitch, envelope, filter
 // and place in 3D (interaural time and level, head shadow, elevation tilt, distance, a shared room). openDAW shows
 // the page in its device panel (feature "opendaw:device-panel", extension "opendaw.device-panel/1"), every host in
-// the window.
+// the window. openDAW also keeps the sample in its project (extension "opendaw.samples/1", slot 0): the state then
+// holds only its name, the host hands the frames over; other hosts get the sample in the state.
 
 #include <clap/clap.h>
 #include <clap/ext/draft/webview.h>
@@ -119,6 +120,7 @@ static const char *MODE_TEXTS[] = {"MONO", "POLY"};
 #define PAGE_SAMPLE_CLEAR 10
 #define PAGE_REQUEST_PEAKS 11
 #define PAGE_REQUEST_MODS 12
+#define PAGE_SAMPLE_NAME 13
 #define PLUGIN_STATUS 1
 #define PLUGIN_PEAKS 2
 #define PLUGIN_MODS 3
@@ -127,6 +129,19 @@ static const char *MODE_TEXTS[] = {"MONO", "POLY"};
 
 #define OPENDAW_PLUGIN_FEATURE_DEVICE_PANEL "opendaw:device-panel"
 #define OPENDAW_EXT_DEVICE_PANEL "opendaw.device-panel/1"
+#define OPENDAW_EXT_SAMPLES "opendaw.samples/1"
+#define MAX_HOST_SECONDS 600
+
+// openDAW keeps the plugin's samples by key: the host's side says it does, the plugin's takes the frames
+typedef struct opendaw_host_samples {
+    bool (*available)(const clap_host_t *host);
+} opendaw_host_samples_t;
+
+typedef struct opendaw_plugin_samples {
+    float *(*prepare)(const clap_plugin_t *plugin, uint32_t key, uint32_t frames, uint32_t channels, double rate);
+    void (*commit)(const clap_plugin_t *plugin, uint32_t key);
+    void (*clear)(const clap_plugin_t *plugin, uint32_t key);
+} opendaw_plugin_samples_t;
 
 typedef struct opendaw_plugin_device_panel {
     int32_t (*get_uri)(const clap_plugin_t *plugin, char *uri, uint32_t capacity);
@@ -204,6 +219,12 @@ struct Xenon {
     std::atomic<Sample *> retired;
     Sample *latest;
     Sample *uploading;
+    // openDAW keeps the sample (opendaw.samples/1): the state holds its name, the frames arrive in staging
+    bool host_keeps, embedded;
+    char host_name[NAME_CAPACITY];
+    float *staging;
+    uint32_t staging_frames, staging_channels;
+    double staging_rate;
     uint32_t sample_generation, mod_generation;
     uint64_t clock;
     double lfo_phase[2], lfo_hold[2], lfo_value[2];
@@ -958,6 +979,8 @@ static bool xenon_init(const clap_plugin_t *plugin) {
     xenon->host_state = static_cast<const clap_host_state_t *>(host->get_extension(host, CLAP_EXT_STATE));
     xenon->host_webview = static_cast<const clap_host_webview_t *>(host->get_extension(host, CLAP_EXT_WEBVIEW));
     xenon->host_hovered = static_cast<const clap_host_param_hovered_t *>(host->get_extension(host, CLAP_EXT_PARAM_HOVERED));
+    const auto *samples = static_cast<const opendaw_host_samples_t *>(host->get_extension(host, OPENDAW_EXT_SAMPLES));
+    xenon->host_keeps = samples != nullptr && samples->available != nullptr && samples->available(host);
     return true;
 }
 
@@ -968,6 +991,7 @@ static void xenon_destroy(const clap_plugin_t *plugin) {
     if (pending != xenon->current) {sample_free(pending);}
     sample_free(xenon->current);
     sample_free(xenon->uploading);
+    std::free(xenon->staging);
     room_free(xenon->room);
     std::free(xenon->status);
     xenon->~Xenon();
@@ -1183,6 +1207,14 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     if (!write_all(stream, header, sizeof(header))) {return false;}
     if (!write_all(stream, xenon->values, sizeof(xenon->values))) {return false;}
     if (!write_all(stream, xenon->depths, sizeof(xenon->depths))) {return false;}
+    // the host keeps the sample: its name, no frames, a rate of -1 (older Xenons read it as no sample)
+    if (xenon->host_keeps && !xenon->embedded) {
+        const char *name = sample != nullptr ? sample->name : xenon->host_name;
+        const uint32_t name_length = static_cast<uint32_t>(std::strlen(name)), none = 0;
+        const double marker = -1.0;
+        return write_all(stream, &name_length, 4) && (name_length == 0 || write_all(stream, name, name_length))
+            && write_all(stream, &marker, 8) && write_all(stream, &none, 4);
+    }
     const uint32_t frames = sample != nullptr ? sample->frames : 0;
     const uint32_t name_length = sample != nullptr ? static_cast<uint32_t>(std::strlen(sample->name)) : 0;
     const double rate = sample != nullptr ? sample->rate : 0.0;
@@ -1228,6 +1260,14 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         if (index < NAME_CAPACITY) {name[index] = letter;}
     }
     if (!read_all(stream, &rate, 8) || !read_all(stream, &frames, 4)) {return false;}
+    if (frames == 0 && rate < 0.0) { // the host keeps it: the name now, the frames from the host
+        const uint32_t length = name_length < NAME_CAPACITY ? name_length : NAME_CAPACITY - 1;
+        std::memcpy(xenon->host_name, name, length);
+        xenon->host_name[length] = '\0';
+        xenon->embedded = false;
+        return true;
+    }
+    xenon->embedded = frames > 0; // kept in the state until the host has a sample of its own
     if (frames == 0) {return xenon->latest == nullptr || clear_sample(xenon);}
     if (rate < 1000.0 || rate > 384000.0 || frames > MAX_SECONDS * rate) {return false;}
     Sample *sample = sample_create(frames, rate, name, name_length);
@@ -1313,6 +1353,7 @@ static void send_peaks(Xenon *xenon) {
     const Sample *sample = xenon->latest;
     std::memset(message, 0, 152);
     message[0] = PLUGIN_PEAKS;
+    message[1] = xenon->host_keeps ? 1 : 0; // the page hands its files to the host
     const uint32_t frames = sample != nullptr ? sample->frames : 0;
     const double rate = sample != nullptr ? sample->rate : 0.0;
     const uint32_t columns = sample != nullptr ? PEAK_COLUMNS : 0;
@@ -1425,6 +1466,7 @@ static bool webview_receive(const clap_plugin_t *plugin, const void *buffer, uin
             xenon->uploading = nullptr;
             sample_peaks(sample);
             publish(xenon, sample);
+            xenon->embedded = true;
             mark_dirty(xenon);
             send_peaks(xenon);
             return true;
@@ -1437,6 +1479,16 @@ static bool webview_receive(const clap_plugin_t *plugin, const void *buffer, uin
         case PAGE_REQUEST_PEAKS:
             send_peaks(xenon);
             return true;
+        case PAGE_SAMPLE_NAME: { // the page handed the host a file (opendaw.samples/1): its name, the frames follow
+            uint32_t length;
+            if (size < 8) {return false;}
+            std::memcpy(&length, bytes + 4, 4);
+            if (size < 8 + length) {return false;}
+            length = length < NAME_CAPACITY ? length : NAME_CAPACITY - 1;
+            std::memcpy(xenon->host_name, bytes + 8, length);
+            xenon->host_name[length] = '\0';
+            return true;
+        }
         case PAGE_REQUEST_MODS:
             send_mods(xenon);
             return true;
@@ -1536,6 +1588,52 @@ static bool panel_get_width(const clap_plugin_t *plugin, uint32_t height, uint32
 
 static const opendaw_plugin_device_panel_t device_panel = {webview_get_uri, panel_get_width};
 
+// ---- openDAW's sample slot 0: the host writes the frames into staging, commit makes them the sample ----
+
+static float *samples_prepare(const clap_plugin_t *plugin, uint32_t key, uint32_t frames, uint32_t channels, double rate) {
+    Xenon *xenon = xenon_of(plugin);
+    if (key != 0 || frames == 0 || channels == 0 || rate < 1000.0 || rate > 384000.0 || frames > MAX_HOST_SECONDS * rate) {return nullptr;}
+    std::free(xenon->staging);
+    xenon->staging = static_cast<float *>(std::malloc(static_cast<size_t>(frames) * channels * sizeof(float)));
+    xenon->staging_frames = frames;
+    xenon->staging_channels = channels;
+    xenon->staging_rate = rate;
+    return xenon->staging;
+}
+
+static void samples_commit(const clap_plugin_t *plugin, uint32_t key) {
+    Xenon *xenon = xenon_of(plugin);
+    if (key != 0 || xenon->staging == nullptr) {return;}
+    const uint32_t frames = xenon->staging_frames, channels = xenon->staging_channels;
+    Sample *sample = sample_create(frames, xenon->staging_rate, xenon->host_name, static_cast<uint32_t>(std::strlen(xenon->host_name)));
+    if (sample != nullptr) {
+        // mixed to mono, as the page does
+        for (uint32_t channel = 0; channel < channels; channel++) {
+            const float *data = xenon->staging + static_cast<size_t>(channel) * frames;
+            for (uint32_t index = 0; index < frames; index++) {sample->mono[index] += data[index] / channels;}
+        }
+        sample_peaks(sample);
+        publish(xenon, sample);
+        xenon->embedded = false;
+        mark_dirty(xenon);
+        if (xenon->host_webview != nullptr) {send_peaks(xenon);}
+    }
+    std::free(xenon->staging);
+    xenon->staging = nullptr;
+}
+
+static void samples_clear(const clap_plugin_t *plugin, uint32_t key) {
+    Xenon *xenon = xenon_of(plugin);
+    if (key != 0 || xenon->latest == nullptr) {return;}
+    if (clear_sample(xenon)) {
+        xenon->embedded = false;
+        mark_dirty(xenon);
+        if (xenon->host_webview != nullptr) {send_peaks(xenon);}
+    }
+}
+
+static const opendaw_plugin_samples_t plugin_samples = {samples_prepare, samples_commit, samples_clear};
+
 static const void *xenon_get_extension(const clap_plugin_t *plugin, const char *id) {
     (void) plugin;
     if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) {return &audio_ports;}
@@ -1545,6 +1643,7 @@ static const void *xenon_get_extension(const clap_plugin_t *plugin, const char *
     if (std::strcmp(id, CLAP_EXT_WEBVIEW) == 0) {return &webview;}
     if (std::strcmp(id, CLAP_EXT_GUI) == 0) {return &gui;}
     if (std::strcmp(id, OPENDAW_EXT_DEVICE_PANEL) == 0) {return &device_panel;}
+    if (std::strcmp(id, OPENDAW_EXT_SAMPLES) == 0) {return &plugin_samples;}
     return nullptr;
 }
 

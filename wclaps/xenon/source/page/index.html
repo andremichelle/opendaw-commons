@@ -48,7 +48,7 @@
     // message types, see plugin/xenon.cpp
     const PAGE_POLL = 1, PAGE_PARAM_BEGIN = 2, PAGE_PARAM_SET = 3, PAGE_PARAM_END = 4, PAGE_MOD_SET = 5,
         PAGE_SAMPLE_BEGIN = 6, PAGE_HOVER = 7, PAGE_SAMPLE_CHUNK = 8, PAGE_SAMPLE_COMMIT = 9, PAGE_SAMPLE_CLEAR = 10,
-        PAGE_REQUEST_PEAKS = 11, PAGE_REQUEST_MODS = 12
+        PAGE_REQUEST_PEAKS = 11, PAGE_REQUEST_MODS = 12, PAGE_SAMPLE_NAME = 13
     const PLUGIN_STATUS = 1, PLUGIN_PEAKS = 2, PLUGIN_MODS = 3
     const INVALID_ID = 0xffffffff, STATUS_HEADER = 24, GRAIN_FLOATS = 5
     const RATE = 48000, MAX_SECONDS = 60, CHUNK_FRAMES = 32768
@@ -149,7 +149,8 @@
         values: DEFAULTS.slice(), live: DEFAULTS.map((value, id) => normalize(id, value)),
         depths: PARAMS.map(() => SOURCES.map(() => 0)),
         grains: [], sampleGeneration: -1, modGeneration: -1, peaks: null, name: "", frames: 0,
-        section: 0, armed: -1, hovered: INVALID_ID, drag: null, scale: 1, ratio: 0, busy: "", cut: false
+        section: 0, armed: -1, hovered: INVALID_ID, drag: null, scale: 1, ratio: 0, busy: "", cut: false,
+        hostKeeps: false // openDAW keeps the sample (opendaw.samples/1): files go to it, the frames come back
     }
 
     const post = buffer => window.parent.postMessage(buffer, "*")
@@ -185,7 +186,21 @@
 
     // ---- the sample: decoded at 48 kHz, mixed to mono, sent as 16-bit chunks ----
 
+    // openDAW imports the file into its samples and hands the frames to the plugin, which keeps only the name
+    const handToHost = file => {
+        const name = new TextEncoder().encode(file.name.replace(/\.[^.]+$/, "").slice(0, 100))
+        const message = new Uint8Array(8 + name.length)
+        message[0] = PAGE_SAMPLE_NAME
+        new DataView(message.buffer).setUint32(4, name.length, true)
+        message.set(name, 8)
+        post(message.buffer)
+        window.parent.postMessage({webclapSample: {key: 0, file}}, "*")
+        state.cut = false
+        state.busy = "LOADING"
+        updateTags()
+    }
     const upload = async file => {
+        if (state.hostKeeps) {return handToHost(file)}
         state.busy = "DECODING"
         updateTags()
         const context = new OfflineAudioContext(1, 1, RATE)
@@ -242,6 +257,7 @@
     clearAction.addEventListener("click", () => {
         state.cut = false
         post(new Uint8Array([PAGE_SAMPLE_CLEAR]).buffer)
+        if (state.hostKeeps) {window.parent.postMessage({webclapSample: {key: 0}}, "*")}
     })
     fileInput.addEventListener("change", () => {
         tryUpload(fileInput.files[0])
@@ -655,6 +671,8 @@ void main() {
             }
         } else if (type === PLUGIN_PEAKS && view.byteLength >= 152) {
             const frames = view.getUint32(4, true), columns = view.getUint32(16, true)
+            state.hostKeeps = (view.getUint8(1) & 1) !== 0
+            if (state.busy === "LOADING") {state.busy = ""}
             state.frames = frames
             state.rate = view.getFloat64(8, true)
             state.name = new TextDecoder().decode(new Uint8Array(event.data, 28, Math.min(100, view.getUint32(20, true)))).toUpperCase()
