@@ -1614,8 +1614,9 @@ static void samples_commit(const clap_plugin_t *plugin, uint32_t key) {
         }
         sample_peaks(sample);
         publish(xenon, sample);
+        // a delivery after a project load is no edit: only a state that embedded the sample changes
+        if (xenon->embedded) {mark_dirty(xenon);}
         xenon->embedded = false;
-        mark_dirty(xenon);
         if (xenon->host_webview != nullptr) {send_peaks(xenon);}
     }
     std::free(xenon->staging);
