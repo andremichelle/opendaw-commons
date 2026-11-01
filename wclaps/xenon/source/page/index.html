@@ -161,9 +161,11 @@
         if (type === PAGE_PARAM_SET) {message.setFloat64(8, value, true)}
         post(message.buffer)
     }
-    const postDepth = (id, source, depth) => {
+    // live: a drag's step, the plugin tells the host of the change only with the drag's last (one undo step)
+    const postDepth = (id, source, depth, live = false) => {
         const message = new DataView(new ArrayBuffer(16))
         message.setUint8(0, PAGE_MOD_SET)
+        message.setUint8(1, live ? 1 : 0)
         message.setUint32(4, id, true)
         message.setUint32(8, source, true)
         message.setFloat32(12, depth, true)
@@ -549,7 +551,7 @@ void main() {
             if (drag.source >= 0) {
                 const depth = Math.min(1, Math.max(-1, drag.start + travel / (event.shiftKey ? 600 : 120)))
                 state.depths[drag.id][drag.source] = Math.abs(depth) < 0.005 ? 0 : depth
-                postDepth(drag.id, drag.source, state.depths[drag.id][drag.source])
+                postDepth(drag.id, drag.source, state.depths[drag.id][drag.source], true)
             } else if (PARAMS[drag.id].curve === "step") {
                 const steps = Math.round(travel / 12)
                 setValue(drag.id, drag.start + steps)
@@ -589,7 +591,10 @@ void main() {
         const drag = state.drag
         if (drag === null) {return}
         state.drag = null
-        if (drag.source >= 0) {return}
+        if (drag.source >= 0) {
+            if (drag.moved) {postDepth(drag.id, drag.source, state.depths[drag.id][drag.source])}
+            return
+        }
         // a click without a move steps a choice to its next option
         if (!drag.moved && PARAMS[drag.id].curve === "step") {
             const {min, max} = PARAMS[drag.id]

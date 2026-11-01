@@ -1453,7 +1453,8 @@ static bool webview_receive(const clap_plugin_t *plugin, const void *buffer, uin
             std::memcpy(&depth, bytes + 12, 4);
             if (target >= PARAM_COUNT || source >= SOURCE_COUNT || !DEFS[target].modulatable) {return false;}
             xenon->depths[target][source] = static_cast<float>(clamp(depth, -1.0, 1.0));
-            mark_dirty(xenon);
+            // byte 1 set: a drag's step, the drag's last (byte 1 clear) tells the host (one undo step)
+            if (bytes[1] == 0) {mark_dirty(xenon);}
             return true;
         }
         case PAGE_SAMPLE_BEGIN:
