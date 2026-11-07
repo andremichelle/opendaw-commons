@@ -1,0 +1,12 @@
+{
+  "name": "Key Harmonizer",
+  "description": "Adds a voice in thirds, fifths or any scale step above or below every note, following the project key.",
+  "author": {
+    "name": "André Michelle",
+    "github": "andremichelle"
+  },
+  "tags": [
+    "harmony"
+  ],
+  "license": "CC0-1.0"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "Chord Player",
+  "description": "Every note plays the chord of the project's chord track at its position, with an optional bass note.",
+  "author": {
+    "name": "André Michelle",
+    "github": "andremichelle"
+  },
+  "tags": [
+    "chords"
+  ],
+  "license": "CC0-1.0"
+}
