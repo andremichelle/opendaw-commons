@@ -53,51 +53,7 @@ const random = () => {
     seed = (seed * 1664525 + 1013904223) | 0
     return (seed >>> 0) / 4294967296
 }
-const amplitudeOf = (harmonic, frequency) => FORMANTS.reduce((sum, formant) => {
-    const distance = (frequency - formant.frequency) / formant.width
-    return sum + formant.gain * Math.exp(-distance * distance)
-}, 1.0) / Math.pow(harmonic, HARMONIC_FALLOFF)
-const createWavetable = (fundamental) => {
-    const spectrum = new Float32Array(half)
-    const limit = Math.min(HIGHEST_FREQUENCY, sampleRate / 2)
-    for (let harmonic = 1; harmonic <= MAX_HARMONICS; harmonic++) {
-        const relative = Math.pow(harmonic, OVERTONE_STRETCH)
-        const frequency = fundamental * relative
-        if (frequency >= limit) {break}
-        const bandwidthHz = (Math.pow(2.0, BANDWIDTH_CENTS / 1200.0) - 1.0) * fundamental * Math.pow(relative, BANDWIDTH_SCALE)
-        const width = bandwidthHz / (2.0 * sampleRate)
-        const center = frequency / sampleRate
-        const amplitude = amplitudeOf(harmonic, frequency)
-        const first = Math.max(1, Math.floor((center - width * PROFILE_CUT) * WAVETABLE_SIZE))
-        const last = Math.min(half - 1, Math.ceil((center + width * PROFILE_CUT) * WAVETABLE_SIZE))
-        for (let bin = first; bin <= last; bin++) {
-            const offset = (bin / WAVETABLE_SIZE - center) / width
-            spectrum[bin] += amplitude * Math.exp(-offset * offset) / width
-        }
-    }
-    const real = new Float32Array(WAVETABLE_SIZE)
-    const imag = new Float32Array(WAVETABLE_SIZE)
-    for (let bin = 1; bin < half; bin++) {
-        const phase = random() * 2.0 * Math.PI
-        real[bin] = real[WAVETABLE_SIZE - bin] = spectrum[bin] * Math.cos(phase)
-        imag[bin] = spectrum[bin] * Math.sin(phase)
-        imag[WAVETABLE_SIZE - bin] = -imag[bin]
-    }
-    fft.process(real, imag)
-    const max = real.reduce((peak, value) => Math.max(peak, Math.abs(value)), 1e-5)
-    const gain = PEAK / max
-    const shift = Math.round(STEREO_OFFSET * WAVETABLE_SIZE)
-    const audioData = AudioData.create(sampleRate, WAVETABLE_SIZE, 2)
-    const [left, right] = audioData.frames
-    for (let index = 0; index < WAVETABLE_SIZE; index++) {
-        left[index] = real[index] * gain
-        right[index] = real[(index + shift) % WAVETABLE_SIZE] * gain
-    }
-    return audioData
-}
-
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-const nameOf = (key) => `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`
 const ranges = []
 for (let low = LOWEST_KEY; low <= HIGHEST_KEY; low += SEMITONES_PER_ZONE) {
     const high = Math.min(low + SEMITONES_PER_ZONE - 1, HIGHEST_KEY)
@@ -115,9 +71,51 @@ sampler.ampEnvelope.attack = ATTACK_SECONDS
 sampler.ampEnvelope.release = RELEASE_SECONDS
 sampler.groups[0].label = NAME
 if (RANDOM_START > 0.0) {sampler.addModulation(6, 5, RANDOM_START)} // random to sample start
+const limit = Math.min(HIGHEST_FREQUENCY, sampleRate / 2)
+const shift = Math.round(STEREO_OFFSET * WAVETABLE_SIZE)
 for (const {low, high, root} of ranges) {
-    const audioData = createWavetable(midiToHz(root, TUNING_HZ))
-    const sample = await openDAW.addSample(audioData, `${NAME} ${nameOf(root)}`)
+    const fundamental = midiToHz(root, TUNING_HZ)
+    const spectrum = new Float32Array(half)
+    for (let harmonic = 1; harmonic <= MAX_HARMONICS; harmonic++) {
+        const relative = Math.pow(harmonic, OVERTONE_STRETCH)
+        const frequency = fundamental * relative
+        if (frequency >= limit) {break}
+        const bandwidthHz = (Math.pow(2.0, BANDWIDTH_CENTS / 1200.0) - 1.0) * fundamental * Math.pow(relative, BANDWIDTH_SCALE)
+        const width = bandwidthHz / (2.0 * sampleRate)
+        const center = frequency / sampleRate
+        let amplitude = 1.0
+        for (const formant of FORMANTS) {
+            const distance = (frequency - formant.frequency) / formant.width
+            amplitude += formant.gain * Math.exp(-distance * distance)
+        }
+        amplitude /= Math.pow(harmonic, HARMONIC_FALLOFF)
+        const first = Math.max(1, Math.floor((center - width * PROFILE_CUT) * WAVETABLE_SIZE))
+        const last = Math.min(half - 1, Math.ceil((center + width * PROFILE_CUT) * WAVETABLE_SIZE))
+        for (let bin = first; bin <= last; bin++) {
+            const offset = (bin / WAVETABLE_SIZE - center) / width
+            spectrum[bin] += amplitude * Math.exp(-offset * offset) / width
+        }
+    }
+    const real = new Float32Array(WAVETABLE_SIZE)
+    const imag = new Float32Array(WAVETABLE_SIZE)
+    for (let bin = 1; bin < half; bin++) {
+        const phase = random() * 2.0 * Math.PI
+        real[bin] = real[WAVETABLE_SIZE - bin] = spectrum[bin] * Math.cos(phase)
+        imag[bin] = spectrum[bin] * Math.sin(phase)
+        imag[WAVETABLE_SIZE - bin] = -imag[bin]
+    }
+    fft.process(real, imag)
+    let max = 1e-5
+    for (let index = 0; index < WAVETABLE_SIZE; index++) {max = Math.max(max, Math.abs(real[index]))}
+    const gain = PEAK / max
+    const audioData = AudioData.create(sampleRate, WAVETABLE_SIZE, 2)
+    const left = audioData.frames[0]
+    const right = audioData.frames[1]
+    for (let index = 0; index < WAVETABLE_SIZE; index++) {
+        left[index] = real[index] * gain
+        right[index] = real[(index + shift) % WAVETABLE_SIZE] * gain
+    }
+    const sample = await openDAW.addSample(audioData, `${NAME} ${NOTE_NAMES[root % 12]}${Math.floor(root / 12) - 1}`)
     // the wavetable is one seamless cycle, so the whole sample loops without a crossfade
     sampler.addZone(sample, {keyLow: low, keyHigh: high, rootKey: root, keyFade: KEY_FADE, loopMode: 2})
 }
