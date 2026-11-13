@@ -1,0 +1,15 @@
+{
+  "name": "ZynAddSubFX Sampler",
+  "description": "Builds a ZynAddSubFX pad for the Sampler. A dialog asks for the sound, the key range and the wavetable settings. The PADsynth algorithm then renders an own wavetable for every zone and the script maps them as looping zones. Adds the instrument to the open project or creates a new one.",
+  "author": {
+    "name": "André Michelle",
+    "github": "andremichelle"
+  },
+  "tags": [
+    "sampler",
+    "wavetable",
+    "pad",
+    "sample"
+  ],
+  "license": "CC0-1.0"
+}
